@@ -18,6 +18,18 @@ const BPM_MAX: i32 = 400;
 const SWING_OPTIONS: [f32; 4] = [0.0, 0.33, 0.5, 0.66];
 const TAP_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// Preset time signatures cycled with Tab.
+const TS_PRESETS: &[(u8, u8)] = &[
+    (4, 4),
+    (3, 4),
+    (2, 4),
+    (6, 8),
+    (5, 4),
+    (7, 8),
+    (9, 8),
+    (12, 8),
+];
+
 // ─── Sound types ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -121,6 +133,11 @@ impl AudioOutput {
 
 // ─── Beat timing ────────────────────────────────────────────────────────────
 
+/// Interval per top-level beat (a single click).
+/// BPM is clicks per minute, so interval = 60/BPM.
+/// The time signature's denominator is a display label — each click IS one beat
+/// unit. This is the common practice for practice metronomes: 7/8 at 120 BPM
+/// means 120 eighth-note clicks per minute.
 fn beat_interval(bpm: u32) -> Duration {
     Duration::from_secs_f64(60.0 / bpm as f64)
 }
@@ -217,7 +234,8 @@ fn render(
     bpm: u32,
     running: bool,
     beat: u8,
-    beats_per_measure: u8,
+    ts_num: u8,
+    ts_den: u8,
     flash: u8,
     volume: f32,
     swing: f32,
@@ -253,18 +271,20 @@ fn render(
         Span::raw("  "),
         Span::styled("SPACE", Style::default().fg(Color::Cyan)),
         Span::raw(" start/stop  "),
-        Span::styled("↑↓", Style::default().fg(Color::Cyan)),
+        Span::styled("↑↓+-", Style::default().fg(Color::Cyan)),
         Span::raw(" BPM  "),
+        Span::styled("Tab", Style::default().fg(Color::Cyan)),
+        Span::raw(" time sig  "),
         Span::styled("1-9", Style::default().fg(Color::Cyan)),
-        Span::raw(" meter  "),
+        Span::raw(" num  "),
+        Span::styled("d", Style::default().fg(Color::Cyan)),
+        Span::raw(" den  "),
         Span::styled("t", Style::default().fg(Color::Cyan)),
         Span::raw(" tap  "),
         Span::styled("w", Style::default().fg(Color::Cyan)),
         Span::raw(" swing  "),
         Span::styled("n", Style::default().fg(Color::Cyan)),
         Span::raw(" sound  "),
-        Span::styled("[ ]", Style::default().fg(Color::Cyan)),
-        Span::raw(" vol  "),
         Span::styled("Q", Style::default().fg(Color::Cyan)),
         Span::raw(" quit"),
     ]);
@@ -296,18 +316,23 @@ fn render(
         Style::default().fg(Color::Gray)
     };
 
-    let bpm_line = Line::from(vec![Span::styled(
-        format!("▐  {}  ▌", bpm),
-        bpm_style,
-    )]);
+    // BPM line with time signature
+    let bpm_line = Line::from(vec![
+        Span::styled(format!("▐  {}  ▌", bpm), bpm_style),
+        Span::raw("   "),
+        Span::styled(
+            format!("{}/{}", ts_num, ts_den),
+            Style::default().fg(Color::Magenta),
+        ),
+    ]);
     frame.render_widget(
         Paragraph::new(bpm_line).alignment(Alignment::Center),
         bpm_chunks[0],
     );
 
     let flash_active = flash > 0;
-    let mut beat_spans: Vec<Span> = Vec::with_capacity(beats_per_measure as usize * 3);
-    for i in 0..beats_per_measure {
+    let mut beat_spans: Vec<Span> = Vec::with_capacity(ts_num as usize * 3);
+    for i in 0..ts_num {
         if i > 0 {
             beat_spans.push(Span::raw(" "));
         }
@@ -329,7 +354,7 @@ fn render(
             Style::default().fg(state_color),
         ),
         Span::raw("  |  "),
-        Span::raw(format!("{}/{}", beat + 1, beats_per_measure)),
+        Span::raw(format!("beat {}/{}", beat + 1, ts_num)),
         Span::raw("  |  "),
         Span::raw(format!("{} BPM", bpm)),
         Span::raw("  |  "),
@@ -383,13 +408,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut bpm: u32 = 120;
     let mut running = false;
     let mut beat: u8 = 0;
-    let mut beats_per_measure: u8 = 4;
+    let mut ts_num: u8 = 4; // numerator (beats per measure)
+    let mut ts_den: u8 = 4; // denominator (note value: 4, 8, 16)
     let mut flash: u8 = 0;
     let mut volume: f32 = 0.5;
     let mut swing: f32 = 0.0;
     let mut sound = SoundType::Click;
     let mut tap = TapTempo::new();
     let mut next_beat = Instant::now();
+
+    /// Cycle through common time signature presets.
+    fn cycle_ts_preset(num: u8, den: u8) -> (u8, u8) {
+        let idx = TS_PRESETS
+            .iter()
+            .position(|&(n, d)| n == num && d == den)
+            .unwrap_or(0);
+        let next = TS_PRESETS[(idx + 1) % TS_PRESETS.len()];
+        (next.0, next.1)
+    }
 
     loop {
         if event::poll(Duration::from_millis(8))? {
@@ -459,12 +495,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     KeyCode::Char('[') => volume = (volume - 0.1).max(0.0),
                     KeyCode::Char(']') => volume = (volume + 0.1).min(1.0),
 
-                    // Time signature (1-9 beats per measure)
-                    KeyCode::Char(c) if c >= '1' && c <= '9' => {
-                        beats_per_measure = c.to_digit(10).unwrap() as u8;
-                        if beat >= beats_per_measure {
+                    // Time signature — Tab cycles presets
+                    KeyCode::Tab => {
+                        let (n, d) = cycle_ts_preset(ts_num, ts_den);
+                        ts_num = n;
+                        ts_den = d;
+                        if beat >= ts_num {
                             beat = 0;
                         }
+                    }
+
+                    // Time signature — numerator (1-9 beats per measure)
+                    KeyCode::Char(c) if c >= '1' && c <= '9' => {
+                        ts_num = c.to_digit(10).unwrap() as u8;
+                        if beat >= ts_num {
+                            beat = 0;
+                        }
+                    }
+
+                    // Time signature — denominator (d cycles 4→8→16)
+                    KeyCode::Char('d') => {
+                        ts_den = match ts_den {
+                            4 => 8,
+                            8 => 16,
+                            _ => 4,
+                        };
                     }
 
                     // Tap tempo
@@ -495,7 +550,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if running {
             let now = Instant::now();
             while now >= next_beat {
-                beat = (beat + 1) % beats_per_measure;
+                beat = (beat + 1) % ts_num;
                 audio.play_click(beat == 0, volume, sound);
                 flash = 6;
                 next_beat += next_beat_duration(bpm, swing, beat);
@@ -514,7 +569,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Render
         terminal.draw(|f| {
-            render(f, bpm, running, beat, beats_per_measure, flash, volume, swing, sound, &tap);
+            render(
+                f, bpm, running, beat, ts_num, ts_den, flash, volume, swing, sound, &tap,
+            );
         })?;
     }
 

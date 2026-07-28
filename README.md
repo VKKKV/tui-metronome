@@ -8,7 +8,7 @@ A terminal metronome with a clean TUI, built with Rust + ratatui + rodio.
 - **Swing** — 4 levels: straight / light / swing / triplet
 - **5 sound types** — click / wood / cowbell / sidestick / beep
 - **Adjustable volume** — 0% to 100%
-- **Time signature** — 1 to 9 beats per measure
+- **Time signature** — numerator 1–9, denominator 4/8/16, plus Tab preset cycle: 4/4, 3/4, 2/4, 6/8, 5/4, 7/8, 9/8, 12/8
 - **BPM range** — 10 to 400
 - **Visual beat indicators** — flashing beat dots, accent on beat 1
 - **Single-threaded** — no audio thread overhead, Instant-based precision
@@ -58,7 +58,9 @@ tui-metronome
 | `Space` | Start / stop |
 | `↑` `↓` or `+` `-` | BPM ±1 |
 | `PgUp` `PgDn` | BPM ±10 |
-| `1`–`9` | Beats per measure |
+| `Tab` | Cycle time signature presets (4/4 → 3/4 → 2/4 → 6/8 → 5/4 → 7/8 → 9/8 → 12/8) |
+| `1`–`9` | Set numerator (beats per measure) |
+| `d` | Cycle denominator (4 → 8 → 16) |
 | `t` | Tap tempo (press 2+ times) |
 | `w` | Cycle swing (straight → light → swing → triplet) |
 | `n` | Cycle sound (click → wood → cowbell → sidestick → beep) |

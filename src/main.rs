@@ -30,6 +30,11 @@ const TS_PRESETS: &[(u8, u8)] = &[
     (12, 8),
 ];
 
+/// Max simultaneously active pulse rings.
+const PULSE_MAX_RINGS: usize = 4;
+/// How many render frames each pulse ring lives for.
+const PULSE_LIFE_FRAMES: u8 = 18;
+
 // ─── Sound types ────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -134,25 +139,20 @@ impl AudioOutput {
 // ─── Beat timing ────────────────────────────────────────────────────────────
 
 /// Interval per top-level beat (a single click).
-/// BPM is clicks per minute, so interval = 60/BPM.
-/// The time signature's denominator is a display label — each click IS one beat
-/// unit. This is the common practice for practice metronomes: 7/8 at 120 BPM
-/// means 120 eighth-note clicks per minute.
 fn beat_interval(bpm: u32) -> Duration {
     Duration::from_secs_f64(60.0 / bpm as f64)
 }
 
 /// Interval to the next beat, applying swing.
-/// Swing delays off-beats: after on-beat → longer gap, after off-beat → shorter.
 fn next_beat_duration(bpm: u32, swing: f32, current_beat: u8) -> Duration {
     let base = beat_interval(bpm);
     if swing <= 0.0 {
         return base;
     }
     let factor = if current_beat % 2 == 0 {
-        1.0 + swing as f64 // after on-beat → longer gap
+        1.0 + swing as f64
     } else {
-        1.0 - swing as f64 // after off-beat → shorter gap
+        1.0 - swing as f64
     };
     Duration::from_secs_f64(base.as_secs_f64() * factor)
 }
@@ -203,6 +203,106 @@ impl TapTempo {
     }
 }
 
+// ─── Pulse rings (full-screen center expansion effect) ──────────────────────
+
+/// One expanding ring from the center of the screen, triggered on each beat.
+struct PulseRing {
+    /// 0 = just spawned, PULSE_LIFE_FRAMES = expired.
+    age: u8,
+    /// true for accent beat (beat 1), false otherwise.
+    accent: bool,
+}
+
+struct PulseFx {
+    rings: Vec<PulseRing>,
+    enabled: bool,
+}
+
+impl PulseFx {
+    fn new() -> Self {
+        Self {
+            rings: Vec::with_capacity(PULSE_MAX_RINGS),
+            enabled: false,
+        }
+    }
+
+    fn trigger(&mut self, accent: bool) {
+        if !self.enabled {
+            return;
+        }
+        // Evict oldest ring if at capacity.
+        if self.rings.len() >= PULSE_MAX_RINGS {
+            self.rings.remove(0);
+        }
+        self.rings.push(PulseRing { age: 0, accent });
+    }
+
+    fn tick(&mut self) {
+        // Age all rings, evict expired ones.
+        self.rings.iter_mut().for_each(|r| r.age += 1);
+        self.rings.retain(|r| r.age < PULSE_LIFE_FRAMES);
+    }
+
+    fn toggle(&mut self) {
+        self.enabled = !self.enabled;
+        if !self.enabled {
+            self.rings.clear();
+        }
+    }
+}
+
+/// Draw the pulse rings centered on the full screen area.
+fn render_pulse_rings(frame: &mut Frame, area: Rect, fx: &PulseFx) {
+    if !fx.enabled || fx.rings.is_empty() {
+        return;
+    }
+    let cx = area.x + area.width / 2;
+    let cy = area.y + area.height / 2;
+    // Scale: expand rate in columns per frame step. We use half-rows
+    // (terminal cells are taller than wide) so horizontal expansion is
+    // 2× vertical to look like a circle.
+    let max_rings = fx.rings.len();
+    for ring in &fx.rings {
+        let progress = ring.age as f64 / PULSE_LIFE_FRAMES as f64;
+        let fade = ((1.0 - progress) * 255.0) as u8;
+        let radius = (ring.age as u16) * 2 + 1; // grows ~2 cells per frame
+        let color = if ring.accent { Color::Rgb(255, 200, fade) } else { Color::Rgb(100, 200, fade) };
+
+        // Draw expanded rectangle at each corner
+        // We only draw the rectangular outline on a terminal so we
+        // iterate from the center outward.
+        let buf = frame.buffer_mut();
+        let half_w = radius;
+        let half_h = (radius as f32 * 0.5) as u16;
+        let x1 = cx.saturating_sub(half_w);
+        let x2 = (cx + half_w).min(area.right().saturating_sub(1));
+        let y1 = cy.saturating_sub(half_h);
+        let y2 = (cy + half_h).min(area.bottom().saturating_sub(1));
+
+        for x in x1..=x2 {
+            for &y in &[y1, y2] {
+                if y < area.top() || y >= area.bottom() || x >= area.right() {
+                    continue;
+                }
+                let cell = &mut buf[(x, y)];
+                cell.set_symbol("·");
+                cell.set_style(Style::default().fg(color));
+            }
+        }
+        for y in y1..=y2 {
+            for &x in &[x1, x2] {
+                if x < area.left() || x >= area.right() || y >= area.bottom() {
+                    continue;
+                }
+                let cell = &mut buf[(x, y)];
+                cell.set_symbol("·");
+                cell.set_style(Style::default().fg(color));
+            }
+        }
+    }
+    let _ = max_rings; // suppress unused warning
+}
+
 // ─── Beat indicators ────────────────────────────────────────────────────────
 
 fn beat_span(beat_idx: u8, current_beat: u8, flash_active: bool) -> Span<'static> {
@@ -241,6 +341,7 @@ fn render(
     swing: f32,
     sound: SoundType,
     tap: &TapTempo,
+    pulse: &PulseFx,
 ) {
     let area = frame.area();
     if area.width < 40 || area.height < 12 {
@@ -248,6 +349,9 @@ fn render(
         frame.render_widget(p, area);
         return;
     }
+
+    // Render pulse rings behind everything (full screen area).
+    render_pulse_rings(frame, area, pulse);
 
     let block = Block::default()
         .title(" TUI Metronome ")
@@ -285,6 +389,8 @@ fn render(
         Span::raw(" swing  "),
         Span::styled("n", Style::default().fg(Color::Cyan)),
         Span::raw(" sound  "),
+        Span::styled("p", Style::default().fg(Color::Cyan)),
+        Span::raw(" pulse  "),
         Span::styled("Q", Style::default().fg(Color::Cyan)),
         Span::raw(" quit"),
     ]);
@@ -346,7 +452,11 @@ fn render(
     // Status bar
     let icon = if running { "▶" } else { "■" };
     let state_label = if running { "RUNNING" } else { "STOPPED" };
-    let state_color = if running { Color::Green } else { Color::DarkGray };
+    let state_color = if running {
+        Color::Green
+    } else {
+        Color::DarkGray
+    };
 
     let mut status_spans = vec![
         Span::styled(
@@ -372,6 +482,15 @@ fn render(
         Span::styled(
             format!("sound: {}", sound.label()),
             Style::default().fg(Color::Blue),
+        ),
+        Span::raw("  |  "),
+        Span::styled(
+            format!("pulse: {}", if pulse.enabled { "on" } else { "off" }),
+            if pulse.enabled {
+                Style::default().fg(Color::Yellow)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            },
         ),
     ];
 
@@ -408,13 +527,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut bpm: u32 = 120;
     let mut running = false;
     let mut beat: u8 = 0;
-    let mut ts_num: u8 = 4; // numerator (beats per measure)
-    let mut ts_den: u8 = 4; // denominator (note value: 4, 8, 16)
+    let mut ts_num: u8 = 4;
+    let mut ts_den: u8 = 4;
     let mut flash: u8 = 0;
     let mut volume: f32 = 0.5;
     let mut swing: f32 = 0.0;
     let mut sound = SoundType::Click;
     let mut tap = TapTempo::new();
+    let mut pulse = PulseFx::new();
     let mut next_beat = Instant::now();
 
     /// Cycle through common time signature presets (forward or backward).
@@ -451,6 +571,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             next_beat = Instant::now();
                             audio.play_click(true, volume, sound);
                             flash = 6;
+                            pulse.trigger(true);
                             next_beat += beat_interval(bpm);
                         }
                     }
@@ -461,8 +582,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if new != bpm {
                             bpm = new;
                             if running {
-                                next_beat = Instant::now()
-                                    + next_beat_duration(bpm, swing, beat);
+                                next_beat = Instant::now() + next_beat_duration(bpm, swing, beat);
                             }
                         }
                     }
@@ -471,8 +591,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if new != bpm {
                             bpm = new;
                             if running {
-                                next_beat = Instant::now()
-                                    + next_beat_duration(bpm, swing, beat);
+                                next_beat = Instant::now() + next_beat_duration(bpm, swing, beat);
                             }
                         }
                     }
@@ -481,8 +600,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if new != bpm {
                             bpm = new;
                             if running {
-                                next_beat = Instant::now()
-                                    + next_beat_duration(bpm, swing, beat);
+                                next_beat = Instant::now() + next_beat_duration(bpm, swing, beat);
                             }
                         }
                     }
@@ -491,8 +609,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if new != bpm {
                             bpm = new;
                             if running {
-                                next_beat = Instant::now()
-                                    + next_beat_duration(bpm, swing, beat);
+                                next_beat = Instant::now() + next_beat_duration(bpm, swing, beat);
                             }
                         }
                     }
@@ -501,10 +618,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     KeyCode::Char('[') => volume = (volume - 0.1).max(0.0),
                     KeyCode::Char(']') => volume = (volume + 0.1).min(1.0),
 
-                    // Time signature — Tab cycles presets forward, Shift+Tab backward
+                    // Time signature — Tab cycles presets forward, Shift+Tab (BackTab) backward
                     KeyCode::Tab => {
-                        let forward = !key.modifiers.contains(event::KeyModifiers::SHIFT);
-                        let (n, d) = cycle_ts_preset(ts_num, ts_den, forward);
+                        let (n, d) = cycle_ts_preset(ts_num, ts_den, true);
+                        ts_num = n;
+                        ts_den = d;
+                        if beat >= ts_num {
+                            beat = 0;
+                        }
+                    }
+                    KeyCode::BackTab => {
+                        let (n, d) = cycle_ts_preset(ts_num, ts_den, false);
                         ts_num = n;
                         ts_den = d;
                         if beat >= ts_num {
@@ -514,7 +638,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // Time signature — numerator (1-9 beats per measure)
                     KeyCode::Char(c) if c >= '1' && c <= '9' => {
-                        ts_num = c.to_digit(10).unwrap() as u8;
+                        ts_num = cell_to_digit(9, c);
                         if beat >= ts_num {
                             beat = 0;
                         }
@@ -548,6 +672,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // Sound cycle
                     KeyCode::Char('n') => sound = sound.next(),
 
+                    // Pulse effect toggle
+                    KeyCode::Char('p') => pulse.toggle(),
+
                     _ => {}
                 }
             }
@@ -560,9 +687,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 beat = (beat + 1) % ts_num;
                 audio.play_click(beat == 0, volume, sound);
                 flash = 6;
+                pulse.trigger(beat == 0);
                 next_beat += next_beat_duration(bpm, swing, beat);
 
-                // Prevent burst after sleep/suspend
                 if now + beat_interval(bpm) * 2 < next_beat {
                     next_beat = now + next_beat_duration(bpm, swing, beat);
                 }
@@ -574,10 +701,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             flash -= 1;
         }
 
+        // Pulse ring aging
+        pulse.tick();
+
         // Render
         terminal.draw(|f| {
             render(
-                f, bpm, running, beat, ts_num, ts_den, flash, volume, swing, sound, &tap,
+                f, bpm, running, beat, ts_num, ts_den, flash, volume, swing, sound, &tap, &pulse,
             );
         })?;
     }
@@ -588,4 +718,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     terminal.backend_mut().execute(LeaveAlternateScreen)?;
     println!("metronome stopped");
     Ok(())
+}
+
+/// Convert a digit char to a u8, clamped to a maximum.
+fn cell_to_digit(max: u8, c: char) -> u8 {
+    let d = c.to_digit(10).unwrap_or(0) as u8;
+    d.min(max)
 }

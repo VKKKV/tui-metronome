@@ -58,7 +58,7 @@ tui-metronome
 | `Space` | Start / stop |
 | `↑` `↓` or `+` `-` | BPM ±1 |
 | `PgUp` `PgDn` | BPM ±10 |
-| `Tab` | Cycle time signature presets (4/4 → 3/4 → 2/4 → 6/8 → 5/4 → 7/8 → 9/8 → 12/8) |
+| `Tab` / `Shift+Tab` | Cycle time signature presets forward / backward (4/4 → 3/4 → 2/4 → 6/8 → 5/4 → 7/8 → 9/8 → 12/8) |
 | `1`–`9` | Set numerator (beats per measure) |
 | `d` | Cycle denominator (4 → 8 → 16) |
 | `t` | Tap tempo (press 2+ times) |

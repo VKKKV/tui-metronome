@@ -417,13 +417,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut tap = TapTempo::new();
     let mut next_beat = Instant::now();
 
-    /// Cycle through common time signature presets.
-    fn cycle_ts_preset(num: u8, den: u8) -> (u8, u8) {
+    /// Cycle through common time signature presets (forward or backward).
+    fn cycle_ts_preset(num: u8, den: u8, forward: bool) -> (u8, u8) {
         let idx = TS_PRESETS
             .iter()
             .position(|&(n, d)| n == num && d == den)
             .unwrap_or(0);
-        let next = TS_PRESETS[(idx + 1) % TS_PRESETS.len()];
+        let len = TS_PRESETS.len() as i32;
+        let next_idx = if forward {
+            (idx + 1) % len as usize
+        } else {
+            ((idx as i32 - 1 + len) % len) as usize
+        };
+        let next = TS_PRESETS[next_idx];
         (next.0, next.1)
     }
 
@@ -495,9 +501,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     KeyCode::Char('[') => volume = (volume - 0.1).max(0.0),
                     KeyCode::Char(']') => volume = (volume + 0.1).min(1.0),
 
-                    // Time signature — Tab cycles presets
+                    // Time signature — Tab cycles presets forward, Shift+Tab backward
                     KeyCode::Tab => {
-                        let (n, d) = cycle_ts_preset(ts_num, ts_den);
+                        let forward = !key.modifiers.contains(event::KeyModifiers::SHIFT);
+                        let (n, d) = cycle_ts_preset(ts_num, ts_den, forward);
                         ts_num = n;
                         ts_den = d;
                         if beat >= ts_num {

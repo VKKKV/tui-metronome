@@ -52,12 +52,7 @@ const PULSE_TAIL: f64 = 9.5;
 const PULSE_AMP: f64 = 0.55;
 /// Tail amplitude (brightness of the trailing fade).
 const PULSE_TAIL_AMP: f64 = 0.16;
-/// Breathing amplitude (subtle constant pulsing of the whole screen).
-const PULSE_BREATH_AMP: f64 = 0.05;
-/// Breathing speed.
-const PULSE_BREATH_SPEED: f64 = 0.0008;
-/// Final blend multiplier (max strength of the wave color blend).
-const PULSE_BLEND_MAX: f64 = 0.7;
+/// White peak intensity at the wave crest (0..1).
 const POLL_INTERVAL: Duration = Duration::from_millis(8);
 const FLASH_FRAMES: u8 = 6;
 const MIN_WIDTH: u16 = 40;
@@ -241,19 +236,16 @@ struct PulseWave {
     accent: bool,
 }
 
-/// The pulse system: active waves + geometry caches.
+/// The pulse system: active waves + a distance cache.
 struct PulseField {
     waves: Vec<PulseWave>,
     enabled: bool,
     /// Cached per-cell distance from screen center (y doubled for aspect).
     distances: Vec<f64>,
-    /// Cached per-cell edge falloff.
-    edge_falloff: Vec<f64>,
     geo_w: u16,
     geo_h: u16,
     cx: f64,
     cy: f64,
-    reach: f64,
     /// Animation clock in seconds.
     elapsed: f64,
     last_frame: Instant,
@@ -265,12 +257,10 @@ impl PulseField {
             waves: Vec::with_capacity(PULSE_MAX_WAVES),
             enabled: false,
             distances: Vec::new(),
-            edge_falloff: Vec::new(),
             geo_w: 0,
             geo_h: 0,
             cx: 0.0,
             cy: 0.0,
-            reach: 1.0,
             elapsed: 0.0,
             last_frame: Instant::now(),
         }
@@ -315,25 +305,21 @@ impl PulseField {
         let hf = f64::from(h);
         self.cx = wf / 2.0;
         self.cy = hf / 2.0;
-        let max_dx = self.cx.max(wf - self.cx);
-        let max_dy = self.cy.max(hf - self.cy) * 2.0;
-        self.reach = max_dx.hypot(max_dy) + PULSE_TAIL;
         let area = usize::from(w) * usize::from(h);
         self.distances = Vec::with_capacity(area);
-        self.edge_falloff = Vec::with_capacity(area);
         for y in 0..h {
             for x in 0..w {
                 let dx = f64::from(x) + 0.5 - self.cx;
                 let dy = (f64::from(y) + 0.5 - self.cy) * 2.0;
                 self.distances.push(dx.hypot(dy));
-                let f = (1.0 - (self.distances.last().unwrap() / (self.reach * 0.85)).powi(2)).max(0.0);
-                self.edge_falloff.push(f);
             }
         }
     }
 
-    /// Wave intensity at a given distance at the current time.
-    fn wave_strength(&self, dist: f64, wave: &PulseWave, now: Instant) -> f64 {
+    /// Returns (level, peak) where:
+    /// - level = (crest*AMP + tail*TAIL_AMP) * eased  → color intensity
+    /// - peak  = crest * eased                        → white flash at crest
+    fn wave_strength(&self, dist: f64, wave: &PulseWave, now: Instant) -> (f64, f64) {
         let age = now.duration_since(wave.born).as_secs_f64();
         let progress = age / PULSE_LIFETIME;
         let envelope = (progress * std::f64::consts::PI).sin();
@@ -351,10 +337,14 @@ impl PulseField {
         } else {
             0.0
         };
-        (crest * PULSE_AMP + tail * PULSE_TAIL_AMP) * eased
+        let level = (crest * PULSE_AMP + tail * PULSE_TAIL_AMP) * eased;
+        let peak = crest * eased;
+        (level, peak)
     }
 
     /// Post-process: blend wave colors into every cell's background.
+    /// Two-stage mix: black → vivid primary → white at crest.
+    /// No base color — cells with no wave activity keep terminal default.
     fn post_process(&mut self, buf: &mut ratatui::buffer::Buffer, area: Rect) {
         if !self.enabled {
             return;
@@ -364,63 +354,60 @@ impl PulseField {
         self.ensure_geometry(w, h);
 
         let now = Instant::now();
-        let breath =
-            (0.5 + 0.5 * (self.elapsed * PULSE_BREATH_SPEED).sin()) * PULSE_BREATH_AMP;
 
-        let base = Color::Rgb(20, 20, 30);
-        let accent_primary = Color::Rgb(255, 200, 100);
-        let weak_primary = Color::Rgb(100, 180, 255);
+        // Vivid colors — warm amber for accent, bright cyan for weak.
+        let accent_r: f64 = 255.0;
+        let accent_g: f64 = 170.0;
+        let accent_b: f64 = 50.0;
+        let weak_r: f64 = 80.0;
+        let weak_g: f64 = 200.0;
+        let weak_b: f64 = 255.0;
 
         for y in 0..h {
             for x in 0..w {
                 let idx = usize::from(y) * usize::from(w) + usize::from(x);
                 let dist = self.distances[idx];
-                let falloff = self.edge_falloff[idx];
 
                 let mut level = 0.0_f64;
+                let mut peak = 0.0_f64;
                 let mut is_accent = false;
                 for wave in &self.waves {
-                    let s = self.wave_strength(dist, wave, now);
+                    let (s, p) = self.wave_strength(dist, wave, now);
                     if s > 0.0 {
                         level += s;
+                        peak = peak.max(p);
                         if wave.accent {
                             is_accent = true;
                         }
                     }
                 }
                 let level = level / PULSE_MAX_WAVES as f64;
-                let strength = ((level + breath) * falloff).min(1.0) * PULSE_BLEND_MAX;
-
-                if strength < 0.01 {
+                let alpha = level.min(1.0);
+                if alpha < 0.02 {
                     continue;
                 }
+                let peak = peak.min(1.0);
 
-                let primary = if is_accent { accent_primary } else { weak_primary };
-                blend_cell_color(buf, area.x + x, area.y + y, base, primary, strength as f32);
+                // Select primary color
+                let (pr, pg, pb) = if is_accent {
+                    (accent_r, accent_g, accent_b)
+                } else {
+                    (weak_r, weak_g, weak_b)
+                };
+
+                // Two-stage: black → primary by alpha, → white by peak
+                let r1 = pr * alpha;
+                let g1 = pg * alpha;
+                let b1 = pb * alpha;
+                let w_mix = peak * 0.8; // never full white
+                let r = (r1 + (255.0 - r1) * w_mix).round() as u8;
+                let g = (g1 + (255.0 - g1) * w_mix).round() as u8;
+                let b = (b1 + (255.0 - b1) * w_mix).round() as u8;
+
+                buf[(area.x + x, area.y + y)].set_bg(Color::Rgb(r, g, b));
             }
         }
     }
-}
-
-/// Linear blend from `base` to `primary` by `t` (0..1), set as cell bg.
-fn blend_cell_color(
-    buf: &mut ratatui::buffer::Buffer,
-    x: u16,
-    y: u16,
-    base: Color,
-    primary: Color,
-    t: f32,
-) {
-    let blended = match (base, primary) {
-        (Color::Rgb(br, bg, bb), Color::Rgb(pr, pg, pb)) => {
-            let r = (f32::from(br) + (f32::from(pr) - f32::from(br)) * t).round() as u8;
-            let g = (f32::from(bg) + (f32::from(pg) - f32::from(bg)) * t).round() as u8;
-            let b = (f32::from(bb) + (f32::from(pb) - f32::from(bb)) * t).round() as u8;
-            Color::Rgb(r, g, b)
-        }
-        _ => primary,
-    };
-    buf[(x, y)].set_bg(blended);
 }
 
 // ─── TUI rendering ──────────────────────────────────────────────────────────

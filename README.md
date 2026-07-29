@@ -10,9 +10,9 @@ A terminal metronome with a clean TUI, built with Rust + ratatui + rodio.
 - **Adjustable volume** — 0% to 100%
 - **Time signature** — numerator 1–9, denominator 4/8/16, plus Tab preset cycle: 4/4, 3/4, 2/4, 6/8, 5/4, 7/8, 9/8, 12/8
 - **BPM range** — 10 to 400
-- **Pulse effect** — full-screen center expansion rings on each beat (toggle with `p`)
+- **Pulse effect** — full-screen radial wave field on each beat, opencode-style color gradient (toggle with `p`)
 - **Visual beat indicators** — flashing beat dots, accent on beat 1
-- **Single-threaded** — no audio thread overhead, Instant-based precision
+- **Instant-based timing** — drift-free beat scheduling using monotonic clocks
 
 ## Install
 
@@ -65,7 +65,7 @@ tui-metronome
 | `t` | Tap tempo (press 2+ times) |
 | `w` | Cycle swing (straight → light → swing → triplet) |
 | `n` | Cycle sound (click → wood → cowbell → sidestick → beep) |
-| `p` | Toggle pulse effect (full-screen center expansion rings on each beat) |
+| `p` | Toggle pulse wave field (radial color gradient on each beat) |
 | `[` `]` | Volume −10% / +10% |
 | `q` or `Esc` | Quit |
 
@@ -86,17 +86,18 @@ Swing shifts alternate beats — the off-beat is delayed, giving a triplet/shuff
 
 ### Pulse Effect
 
-Press `p` to toggle a full-screen visual pulse: on each beat, a ring expands outward from the center of the terminal, fading as it grows. Accent beats (beat 1) glow warm yellow; other beats glow cool blue. Up to 4 rings can be active simultaneously. The effect is purely visual — it does not affect audio timing.
+Press `p` to toggle a full-screen radial wave field: on each beat, a wave expands outward from the center of the terminal. The wave is not a drawn outline — every cell's background color is independently computed as a radial scalar field (distance from center × wave function), producing a smooth color gradient that pulses and fades. Accent beats (beat 1) glow warm amber; other beats glow cool blue. Up to 4 waves can be active simultaneously, each with a 2-second lifetime. A subtle breathing effect runs continuously when pulse is enabled. The effect is purely visual — it does not affect audio timing.
 
 ## Architecture
 
 - **ratatui** — terminal UI framework
 - **crossterm** — terminal control (raw mode, alternate screen)
 - **rodio** — audio playback (ALSA sink via PulseAudio/PipeWire)
-- Single-threaded event loop with 8ms poll interval
+- Event loop with 8ms poll interval, panic-guarded terminal cleanup
 - `Instant`-based beat scheduling for drift-free timing
+- Terminal state restored on panic/error (raw mode + alternate screen cleanup)
 - Swing modifies the gap between beats: after on-beats the gap is longer, after off-beats shorter
-- Pulse rings are drawn directly to the ratatui buffer as rectangular outlines, squashed vertically to approximate circles
+- Pulse waves are rendered as a per-cell radial scalar field: each cell's bg color is blended from a base color toward a wave color, modulated by distance, crest, tail, and edge falloff functions (inspired by opencode's bg-pulse-render)
 
 ## License
 
